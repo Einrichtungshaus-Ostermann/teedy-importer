@@ -32,7 +32,7 @@ func init() {
 	TagNames = strings.Split(os.Getenv("TAGS"), ",")
 	Language = os.Getenv("LANG")
 	Host = os.Getenv("HOST")
-	Path = os.Getenv("PATH")
+	Path = os.Getenv("IMPORT_PATH")
 }
 
 func main() {
@@ -60,14 +60,14 @@ func main() {
 
 	documents := GetDocuments(client)
 
-	for _, f := range files {
-		name := path.Base(f)                        // Get plain filename
-		name = name[:len(name)-len(path.Ext(name))] // Remove extension from filename
+	for _, filePath := range files {
+		name := getFilename(filePath)
 
 		var documentID string
 		var hasFile bool
 		for _, doc := range documents.GetArray("documents") {
-			if !bytes.Equal([]byte(name), doc.GetStringBytes("title")) {
+			docTitle := string(doc.GetStringBytes("title"))
+			if name != docTitle {
 				continue
 			}
 
@@ -95,18 +95,45 @@ func main() {
 			logrus.Infof("Skipping creating Document %s", name)
 		}
 
+		file, err := os.OpenFile(filePath, os.O_RDONLY, 0700)
+		if err != nil {
+			logrus.Errorf("Error opening file `%s`: %v", filePath, err)
+			continue
+		}
+
 		if !hasFile {
-			CreateFile(client, f, documentID)
+			CreateFile(client, file, strings.ReplaceAll(name, "%", ""), documentID)
+		}
+	}
+
+	for _, doc := range documents.GetArray("documents") {
+		removeDoc := true
+		docTitle := string(doc.GetStringBytes("title"))
+		documentID := string(doc.GetStringBytes("id"))
+
+		for _, checkFile := range files {
+			fileName := getFilename(checkFile)
+
+			if fileName != docTitle {
+				continue
+			}
+
+			removeDoc = false
+		}
+
+		if removeDoc {
+			logrus.Infof("Should remove %s", docTitle)
+			DeleteDocument(client, documentID)
 		}
 	}
 }
 
-func CreateFile(client *resty.Client, file, documentID string) {
+func CreateFile(client *resty.Client, file *os.File, fileName, documentID string) {
 	resp, err := client.R().
 		SetFormData(map[string]string{
 			"id": documentID,
 		}).
-		SetFile("file", file).
+		SetFileReader("file", fileName, file).
 		Put(ApiAppFile)
 	if err != nil {
 		logrus.Fatalf("Error uploading file: %v", err)
@@ -117,7 +144,12 @@ func CreateFile(client *resty.Client, file, documentID string) {
 		logrus.Fatalf("Error parsing json: %v", err)
 	}
 
-	logrus.Info("Upload complete. Status: %s", string(value.GetStringBytes("status")))
+	if string(value.GetStringBytes("type")) == "FileError" {
+		logrus.Info(value.String())
+		logrus.Fatal("Error uploading file")
+	}
+
+	logrus.Infof("Upload complete. Status: %s", string(value.GetStringBytes("status")))
 }
 
 func CreateDocument(client *resty.Client, name string) string {
@@ -135,7 +167,18 @@ func CreateDocument(client *resty.Client, name string) string {
 		logrus.Fatalf("Error parsing json: %v", err)
 	}
 
+	logrus.Infof("Created Document")
+
 	return string(value.GetStringBytes("id"))
+}
+
+func DeleteDocument(client *resty.Client, documentID string) {
+	_, err := client.R().Delete(ApiAppDocument + "/" + documentID)
+	if err != nil {
+		logrus.Fatalf("Error creating document: %v", err)
+	}
+
+	logrus.Infof("Deleted Document")
 }
 
 func GetDocuments(client *resty.Client) *fastjson.Value {
@@ -160,7 +203,7 @@ func GatherFiles() []string {
 		}
 
 		files = append(files, path)
-		logrus.Infof("found file %s - %d", path, info.Size())
+		logrus.Infof("found file %s - %d bytes", path, info.Size())
 
 		return nil
 	})
@@ -212,4 +255,10 @@ func GetTags(client *resty.Client) *fastjson.Value {
 	}
 
 	return value
+}
+
+func getFilename(s string) string {
+	s = path.Base(s)                // Get plain filename
+	s = s[:len(s)-len(path.Ext(s))] // Remove extension from filename
+	return s
 }
